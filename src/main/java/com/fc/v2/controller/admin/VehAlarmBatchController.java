@@ -100,8 +100,11 @@ public class VehAlarmBatchController extends BaseController {
         }
         int r = vehAlarmBatchService.importBatch(no, param.getSourceKind(), param.getReportYear(),
                 param.getReportMonth(), param.getRows());
-        if (r < 0) {
+        if (r == -1) {
             return error("册上行数压过处里定的顶，整册原样退回，库里一行不留");
+        }
+        if (r == -2) {
+            return error("册上有条目不合规，整批连坐，整册原样退回，库里一行不留");
         }
         // 办结即出回执，三个数回库现点现取
         return success(200, "整册导入办结", vehAlarmBatchService.receipt(no));

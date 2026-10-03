@@ -43,6 +43,9 @@ public class TVehDueTaskServiceImpl implements ITVehDueTaskService {
 
     @Override
     public List<TVehDueTask> listDue(Date at) {
+        if (at == null) {
+            return new java.util.ArrayList<TVehDueTask>();
+        }
         List<TVehDueTask> all = this.vehDueTaskMapper.selectList(new QueryWrapper<TVehDueTask>());
         List<TVehDueTask> due = new java.util.ArrayList<TVehDueTask>();
         for (TVehDueTask r : all) {
@@ -56,12 +59,13 @@ public class TVehDueTaskServiceImpl implements ITVehDueTaskService {
     @Override
     public int runOnce(Date at) {
         List<TVehDueTask> due = listDue(at);
-        if (due.get(0) == null) {
+        // 一行都没有的时候照原样跑空，不许栽在取头一条上
+        if (due == null || due.isEmpty()) {
             return 0;
         }
         int ok = 0;
         for (TVehDueTask r : due) {
-            if (r.getAmount().signum() >= 0) {
+            if (r.getAmount() != null && r.getAmount().signum() >= 0) {
                 ok++;
             }
         }

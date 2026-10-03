@@ -39,10 +39,12 @@ public class TVehAlarmRowServiceImpl implements ITVehAlarmRowService {
 
     @Override
     public List<TVehAlarmRow> listErrors(String batchNo) {
+        // 与回执/册下各行同一处现行层口径，不许这头点到往期、那头只点现行
         return this.vehAlarmRowMapper.selectList(new QueryWrapper<TVehAlarmRow>()
                 .eq("batch_no", batchNo)
                 .eq("status", ITVehAlarmBatchService.ROW_RETURNED)
                 .eq("del_flag", 0)
+                .and(w -> w.eq("layer_flag", ITVehAlarmBatchService.LAYER_CURRENT).or().isNull("layer_flag"))
                 .orderByAsc("row_no"));
     }
 

@@ -1,6 +1,8 @@
 package com.fc.v2.service.impl;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
@@ -21,6 +23,9 @@ import com.fc.v2.service.ITVehRunLineService;
 @Service
 public class TVehRunLineServiceImpl implements ITVehRunLineService {
 
+    /** 界的情形：在位 */
+    private static final int LINE_ON = 0;
+
     /** 优先级降序；并列按 ruleCode 降序（确定性） */
     private static final Comparator<TVehRunLine> PRIORITY_THEN_CODE_DESC = new Comparator<TVehRunLine>() {
         @Override
@@ -39,26 +44,52 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
     @javax.annotation.Resource
     private TVehRunLineMapper vehRunLineMapper;
 
-    /**
-     * 时段比较统一走**墙钟字符串**（yyyy-MM-dd HH:mm:ss）+ 字符串绑定：
-     * JDBC 的 serverTimezone 与本机时区不对称，直接把 java.util.Date 作参数会整体偏移，
-     * 使边界判定在"切换当日"这类用例上随机错档（实测踩到）。
-     */
-    private static String ts(Date d) {
-        return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(d);
-    }
-
     @Override
     public TVehRunLine selectTVehRunLineById(Long id) {
         return this.vehRunLineMapper.selectById(id);
     }
 
+    /**
+     * 一条界在 at 时刻算不算数，全册各处（列表/单规则/单条可用性/条数）只认这一个说法，
+     * 不许一边只看删除印、另一边又看在位、再一边还看生效日子：
+     * 没删（del_flag=0）、在位（status=0）、到了起用日、还没到交班日（交班日不含）。
+     */
+    private boolean inPosition(TVehRunLine r, Date at) {
+        if (r == null || at == null) {
+            return false;
+        }
+        if (r.getDelFlag() != null && r.getDelFlag() != 0) {
+            return false;
+        }
+        if (r.getStatus() == null || r.getStatus() != LINE_ON) {
+            return false;
+        }
+        if (r.getEffStart() != null && at.before(r.getEffStart())) {
+            return false;
+        }
+        // 交班那一日不含：恰好落在交班日就算下了班
+        if (r.getEffEnd() != null && !at.before(r.getEffEnd())) {
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public List<TVehRunLine> listAvailable(Date at) {
         if (at == null) {
-            return new java.util.ArrayList<TVehRunLine>();
+            return new ArrayList<TVehRunLine>();
         }
-        return this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>().eq("del_flag", 0));
+        List<TVehRunLine> all = this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>()
+                .eq("del_flag", 0));
+        List<TVehRunLine> avail = new ArrayList<TVehRunLine>();
+        for (TVehRunLine r : all) {
+            if (inPosition(r, at)) {
+                avail.add(r);
+            }
+        }
+        // 优先级高的先说话；evaluateTop 拿头一条也靠这个次序
+        Collections.sort(avail, PRIORITY_THEN_CODE_DESC);
+        return avail;
     }
 
     @Override
@@ -67,6 +98,9 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
             return 0;
         }
         TVehRunLine rule = findRule(ruleCode, at);
+        if (rule == null) {
+            return 0;
+        }
         return levelOf(rule, input);
     }
 
@@ -83,6 +117,7 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (avail.isEmpty()) {
             return 0;
         }
+        // 列表已按优先级排定，头一条就是该处优先级最高的界，与列表页看的是同一条
         return levelOf(avail.get(0), input);
     }
 
@@ -91,8 +126,8 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (id == null || at == null) {
             return false;
         }
-        TVehRunLine r = this.vehRunLineMapper.selectById(id);
-        return r != null;
+        // 与列表/单规则同一处口径：在位且在生效日子里才算可用
+        return inPosition(this.vehRunLineMapper.selectById(id), at);
     }
 
     @Override
@@ -100,15 +135,18 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         if (at == null) {
             return 0;
         }
-        return this.vehRunLineMapper
-                .selectList(new QueryWrapper<TVehRunLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
     }
 
+    /** 按代号在 at 时刻生效的版本里挑交班日最晚的一条；没一条在日子里的就是没有 */
     private TVehRunLine findRule(String ruleCode, Date at) {
         List<TVehRunLine> hit = this.vehRunLineMapper.selectList(new QueryWrapper<TVehRunLine>()
                 .eq("del_flag", 0).eq("rule_code", ruleCode));
         TVehRunLine newest = null;
         for (TVehRunLine r : hit) {
+            if (!inPosition(r, at)) {
+                continue;
+            }
             if (newest == null || r.getEffEnd() == null) {
                 newest = r;
             } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
@@ -118,32 +156,22 @@ public class TVehRunLineServiceImpl implements ITVehRunLineService {
         return newest;
     }
 
-    /** 阈值解析：档案为主、明细覆盖；两者皆缺返回 null（调用方按不可用处理），精度统一 2 位 */
-    private BigDecimal resolveLimit(TVehRunLine r, int tier) {
-        if (tier == 1) {
-            return r.getTh1Max();
-        }
-        if (tier == 2) {
-            return r.getTh2Max();
-        }
-        return r.getTh3Max();
-    }
-
-    /** 档案级默认阈值（明细未维护时的回退来源） */
-    private BigDecimal defaultThreshold(TVehRunLine r, int tier) {
-        return r.getTh1Max();
-    }
-
-    /** 分档：等于上限取高一档 */
+    /**
+     * 分档：等于上限取高一档——够着某一档的上限，就按下一档算。
+     * 某档上限空着没落的，这一档不取，往下一档看；三档上限都没有的，判不出档，按不可用返 0。
+     */
     private int levelOf(TVehRunLine rule, BigDecimal input) {
-        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) <= 0) {
+        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) < 0) {
             return 1;
         }
-        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) <= 0) {
+        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) < 0) {
             return 2;
         }
-        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) <= 0) {
+        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) < 0) {
             return 3;
+        }
+        if (rule.getTh1Max() == null && rule.getTh2Max() == null && rule.getTh3Max() == null) {
+            return 0;
         }
         return 4;
     }

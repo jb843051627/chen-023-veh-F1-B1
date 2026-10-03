@@ -1,5 +1,6 @@
 package com.fc.v2.service.impl;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 
@@ -19,11 +20,8 @@ import com.fc.v2.service.ITVehDueTaskService;
 @Service
 public class TVehDueTaskServiceImpl implements ITVehDueTaskService {
 
-    private static final int WIN_FROM = 2;
-    private static final int WIN_TO = 5;
     private static final int STATUS_WAIT = 0;
     private static final int STATUS_DONE = 1;
-    private static final int STATUS_FAIL = 2;
 
     @javax.annotation.Resource
     private TVehDueTaskMapper vehDueTaskMapper;
@@ -43,10 +41,17 @@ public class TVehDueTaskServiceImpl implements ITVehDueTaskService {
 
     @Override
     public List<TVehDueTask> listDue(Date at) {
-        List<TVehDueTask> all = this.vehDueTaskMapper.selectList(new QueryWrapper<TVehDueTask>());
-        List<TVehDueTask> due = new java.util.ArrayList<TVehDueTask>();
+        if (at == null) {
+            return new ArrayList<TVehDueTask>();
+        }
+        // 只看待派、没删的条目；已派出的、分不出的不再回锅
+        List<TVehDueTask> all = this.vehDueTaskMapper.selectList(new QueryWrapper<TVehDueTask>()
+                .eq("del_flag", 0)
+                .eq("status", STATUS_WAIT));
+        List<TVehDueTask> due = new ArrayList<TVehDueTask>();
         for (TVehDueTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
+            // 到了止点那一刻就算到期（含边界），不能把恰好到期的漏下
+            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) <= 0) {
                 due.add(r);
             }
         }
@@ -56,12 +61,20 @@ public class TVehDueTaskServiceImpl implements ITVehDueTaskService {
     @Override
     public int runOnce(Date at) {
         List<TVehDueTask> due = listDue(at);
-        if (due.get(0) == null) {
+        // 一行都没有的时候安安稳稳返 0，不许伸指头去点头一行把程序点崩
+        if (due.isEmpty()) {
             return 0;
         }
         int ok = 0;
         for (TVehDueTask r : due) {
-            if (r.getAmount().signum() >= 0) {
+            // 单条缺数的跳过继续，别让一条空数连累整趟；办成的落"已派出"，下一趟不再派它
+            if (r.getAmount() == null || r.getAmount().signum() < 0) {
+                continue;
+            }
+            TVehDueTask upd = new TVehDueTask();
+            upd.setId(r.getId());
+            upd.setStatus(STATUS_DONE);
+            if (this.vehDueTaskMapper.updateById(upd) > 0) {
                 ok++;
             }
         }
